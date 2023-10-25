@@ -174,7 +174,7 @@ class HModel(raynest.model.Model):
         self.data       = data
         self.injection  = injection
         self.names      = ['concentration_parameter', 'N', 'mu_m', 'sigma_m', 'r0', 'z0']
-        self.bounds     = [[0,2], [1,10], [mu-0.05,mu+0.05], [sigma-0.005, sigma+0.005], [r0-1000, r0+1000], [z0-100, z0+100]]
+        self.bounds     = [[0,10], [1,10], [mu-0.05,mu+0.05], [sigma-0.05, sigma+0.05], [r0-1000, r0+1000], [z0-100, z0+100]]
         self.nbins      = 8
         self.bins       = [np.linspace(self.bounds[2][0],self.bounds[2][1],self.nbins),
                            np.linspace(self.bounds[4][0],self.bounds[4][1],self.nbins),
@@ -239,7 +239,7 @@ if __name__ == "__main__":
     n0     = 1
     r0     = 3471
     z0     = 274
-    alpha  = 0.5
+    alpha  = 1
     
     print("length = ", int(T*srate), len(t))
         
@@ -292,11 +292,13 @@ if __name__ == "__main__":
     fig = plt.figure(1)
     ax  = fig.add_subplot(111)
     m   = np.linspace(0.0,3.0,100)
-    ax.plot(m, astrophysical_distribution(m,mu,sigma), 'k', lw=0.7, label='injection')
+
     for s in posterior_samples:
         ax.plot(m, astrophysical_distribution(m,s['mu_m'],s['sigma_m']), 'turquoise', lw=0.7, alpha=0.5)
     for inj in inj_params:
         ax.vlines(inj['M'],0.05,0.9,colors='r',alpha=0.5,lw=0.5)
+
+    ax.plot(m, astrophysical_distribution(m,mu,sigma), 'k', lw=0.7, label='injection')
     plt.legend()
     plt.savefig('test/mass_dist_reconstruction.pdf', bbox_inches='tight')
     plt.close(fig)
