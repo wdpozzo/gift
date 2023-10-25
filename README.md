@@ -1,2 +1,2 @@
 # gift
-Global fit for LISA prototype
+Global Inference For LISA
