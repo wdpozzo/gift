@@ -11,7 +11,7 @@ from math import lgamma
 import sys
 import matplotlib.pyplot as plt
 
-from signals import orbital_frequency, amplitude, chirp, distance
+from waveform import orbital_frequency, amplitude, chirp, distance
 
 def astrophysical_distribution(m, mu, var):
     return norm(mu,np.sqrt(var)).pdf(m)

@@ -15,14 +15,14 @@ class build_ext(_build_ext):
         self.include_dirs.append(numpy.get_include())
 
 ext_modules=[
-    Extension(name="signals",
-              sources=["signals.pyx"],
+    Extension(name="waveform",
+              sources=["waveform.pyx"],
               libraries=['m'],  # Unix-like specific
               extra_compile_args=['-O3', '-ffast-math'],
               include_dirs=[numpy.get_include(), "."])
     ]
 
-setup(name="hns",
+setup(name="gift",
       ext_modules=cythonize(ext_modules, language_level='3'),
       include_dirs=[numpy.get_include(), "."],
       cmdclass={'build_ext': build_ext},
