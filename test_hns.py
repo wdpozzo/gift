@@ -10,6 +10,7 @@ from itertools import cycle, product
 from math import lgamma
 import sys
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 from waveform import orbital_frequency, amplitude, chirp, distance
 
@@ -25,7 +26,7 @@ def volume_distribution(r, z, rho0, r0, z0):
 def sample_volume_distribution(r0, z0, n0):
     return distance(expon(scale=r0).rvs(size=n0),expon(scale=z0).rvs(size=n0))
 
-def dirichlet_sample_approximation(G0, alpha = 1, tol=0.01):
+def dirichlet_sample_approximation(G0, n, alpha = 1):
     """
     Generate samples from the base distribution
     This is a set of thetas so that the observed distribution is
@@ -33,26 +34,19 @@ def dirichlet_sample_approximation(G0, alpha = 1, tol=0.01):
     
     G0 should be an iterable
     """
-    betas = []
-    pis = []
-    betas.append(beta(1, alpha).rvs())
-    pis.append(betas[0])
+    b    = beta.rvs(1, alpha, size=n)
+    pis  = np.empty_like(b)
+    pis[0] = b[0]
+    pis[1:] = b[1:] * (1 - b[:-1]).cumprod()
 
-    while 1-sum(pis) > tol:
-        s = np.sum([np.log1p(-b) for b in betas])
-        new_beta = beta(1, alpha).rvs()
-        betas.append(new_beta)
-        pis.append(new_beta * np.exp(s))
         
     D   = len(G0)
-    n   = len(pis)
-    
     # generate a number of samples equal to the number of observed categories (events)
     thetas = np.column_stack([G0[i].rvs(size=n) for i in range(D)])
 
     return pis, thetas
 
-def snr(h,d,T,srate,asd=1e-18):
+def snr(h,d,T,srate,asd=1e-20):
     dt = 1.0/srate
     return np.sqrt((4./T)*np.sum(h*d/(dt*asd)**2))
 
@@ -60,7 +54,9 @@ def generate_injection_parameters(events):
     return [LivePoint(['M','r','z','phi'], d=np.array((events[i,0],events[i,1],events[i,2],events[i,3]))) for i in range(events.shape[0])]
 
 def generate_signal_parameters(x, inj = None):
+
     # this is the individual PE job
+
     if inj is not None:
         return [LivePoint(['M','D','phi'], d=np.array((inj[i]['M'],
                                                        distance(inj[i]['r0'],inj[i]['z0']),
@@ -79,7 +75,7 @@ def default_prior_density(p):
     logP = 2.*np.log(distance(p['r'],p['z']))
     return logP
 
-def default_likelihood(p, data, sigma = 1e-18):
+def default_likelihood(p, data, sigma = 1e-20):
     signal = chirp(p, t, t0 = 30000)
     r = (data-signal)/sigma
     return np.sum(-0.5*r**2), signal
@@ -130,8 +126,21 @@ def generate_signal(t, x, t0 = 30000):
 def compute_logL(theta, time, data, n, injection = None):
 
     logL          = np.zeros(n, dtype=np.float64)
-    signals_array = np.zeros((len(theta), len(time)), dtype=np.float64)
     post          = []
+    
+    if injection is not None:
+
+        signals_array = np.zeros((len(injection), len(time)), dtype=np.float64)
+        for j,t in enumerate(injection):
+        
+            signals_array[j,:] = generate_signal(time, t)
+            r = (data - signals_array[:,:].sum(axis=0))/sigma
+            # and the likelihood
+        
+        return injection, -0.5*np.sum(r**2)
+    
+    signals_array = np.zeros((len(theta), len(time)), dtype=np.float64)
+    
     for j,t in enumerate(theta):
         signals_array[j,:] = generate_signal(time, LivePoint(['M','r','z','phi'],d=t))
     
@@ -169,12 +178,12 @@ def compute_logL(theta, time, data, n, injection = None):
 
 class HModel(raynest.model.Model):
 
-    def __init__(self, time, data, mc_n = 1, injection = None):
+    def __init__(self, time, data, mc_n = 10, injection = None):
         self.time       = time
         self.data       = data
         self.injection  = injection
         self.names      = ['concentration_parameter', 'N', 'mu_m', 'sigma_m', 'r0', 'z0']
-        self.bounds     = [[0,10], [1,10], [mu-0.05,mu+0.05], [sigma-0.05, sigma+0.05], [r0-1000, r0+1000], [z0-100, z0+100]]
+        self.bounds     = [[0,3], [1,10], [mu-0.05,mu+0.05], [sigma-0.05, sigma+0.05], [r0-1000, r0+1000], [z0-100, z0+100]]
         self.nbins      = 8
         self.bins       = [np.linspace(self.bounds[2][0],self.bounds[2][1],self.nbins),
                            np.linspace(self.bounds[4][0],self.bounds[4][1],self.nbins),
@@ -182,33 +191,33 @@ class HModel(raynest.model.Model):
                            np.linspace(0.0,2*np.pi,self.nbins)]
         self.mc_n       = mc_n
 
-    def log_likelihood(self, p, sigma = 1e-18):
+    def log_likelihood(self, p, sigma = 1e-20):
         # sample the DP to get the masses from the discrete mass distribution (the universe realisation of the mass function)
         G0            = (norm(p['mu_m'], p['sigma_m']), expon(scale=p['r0']), expon(scale=p['z0']), uniform(0.0,2*np.pi))
-        wi, theta     = dirichlet_sample_approximation(G0, alpha = p['concentration_parameter'], tol = 0.001)
+        wi, theta     = dirichlet_sample_approximation(G0, int(p['N']), alpha = p['concentration_parameter'])
         post, logL    = compute_logL(theta, self.time, self.data, self.mc_n, injection = self.injection)
-        # marginalise (averaging)
+        Arr           = np.row_stack([p.values for p in post])
         
-        Arr = np.row_stack([p.values for p in post])
-
+        if self.injection is not None:
+            wi = np.ones(len(self.injection))
+        
         # histogram the parameters
-        q, edges = np.histogramdd(Arr, bins = self.bins, weights = wi)
+        q, edges         = np.histogramdd(Arr, bins = self.bins, weights = wi)
 
-        bincenters = np.array([(e[1:]+e[:-1])/2. for e in edges])
-        dx         = np.prod([(np.abs(e[1]-e[0])) for e in edges])
+        bincenters       = np.array([(e[1:]+e[:-1])/2. for e in edges])
+        dx               = np.prod([(np.abs(e[1]-e[0])) for e in edges])
         
-        X = product(*bincenters)
-        A = np.array([x for x in X])
-        a = p['concentration_parameter']
+        X                = product(*bincenters)
+        A                = np.array([x for x in X])
+        a                = p['concentration_parameter']
         prior_counts     = a-1
         counts           = np.ravel(q)
         posterior_counts = prior_counts + counts
             
-        predictions   = np.prod([G0[i].pdf(A[:,i]) for i in range(theta.shape[1])],axis=0)*dx
-        predictions  /= np.sum(predictions)
-        normalisation = np.sum([lgamma(e+1) for e in posterior_counts])-lgamma(np.sum(posterior_counts+1))
-
-        logL_dp = np.dot(posterior_counts,np.log(predictions))-normalisation
+        predictions      = np.prod([G0[i].pdf(A[:,i]) for i in range(theta.shape[1])],axis=0)*dx
+        predictions     /= np.sum(predictions)
+        normalisation    = np.sum([lgamma(e+1) for e in posterior_counts])-lgamma(np.sum(posterior_counts+1))
+        logL_dp          = np.dot(posterior_counts,np.log(predictions))-normalisation
             
         return logL+logL_dp
 
@@ -229,17 +238,17 @@ if __name__ == "__main__":
     np.random.seed(66)
     # generate the noise
     T = 20000
-    srate = 0.2/8.
-    sigma_noise = 1e-18
+    srate = 0.2
+    sigma_noise = 1e-20
     t      = np.linspace(0,T,int(T*srate))
     noise  = generate_noise(t, sigma = sigma_noise)
     # generate the population, assume q=1, data from https://arxiv.org/pdf/1606.05292.pdf
     mu     = 0.68*2
     sigma  = 0.13*np.sqrt(2)
     n0     = 1
-    r0     = 3471
+    r0     = 2471
     z0     = 274
-    alpha  = 1
+    alpha  = 0.01
     
     print("length = ", int(T*srate), len(t))
         
@@ -248,8 +257,8 @@ if __name__ == "__main__":
         G0 = (norm(inj_hyper_params['mu_m'], inj_hyper_params['sigma_m']),
               expon(scale=inj_hyper_params['r0']), expon(scale=inj_hyper_params['z0']), uniform(0.0,2*np.pi))
               
-        w, events  = dirichlet_sample_approximation(G0, alpha = inj_hyper_params['concentration_parameter'], tol=1e-6)
-
+        w, events  = dirichlet_sample_approximation(G0, n0, alpha = inj_hyper_params['concentration_parameter'])
+        print('events =',events)
         inj_params = generate_injection_parameters(events)
         # generate the signals
         signals= generate_signals(t, inj_params, t0 = 30000)
@@ -276,10 +285,10 @@ if __name__ == "__main__":
     plt.savefig('test/data.pdf', bbox_inches='tight')
     plt.close(fig)
 
-    M = HModel(t, data, injection = None)
+    M = HModel(t, data, injection = None)#inj_params
     
     if sys.argv[1] == '1':
-        work=raynest.raynest(M, verbose=2, nnest=1, nensemble=3, nlive=100, maxmcmc=20, nslice=0, nhamiltonian=0, resume=0, periodic_checkpoint_interval=1800, output='test')
+        work=raynest.raynest(M, verbose=2, nnest=1, nensemble=5, nlive=100, maxmcmc=20, nslice=0, nhamiltonian=0, resume=0, periodic_checkpoint_interval=1800, output='test')
         work.run()
         posterior_samples = work.posterior_samples
     else:
@@ -287,7 +296,6 @@ if __name__ == "__main__":
         with h5py.File('test/raynest.h5','r') as f:
             logZ = f['combined']['logZ'][()]
             posterior_samples = f['combined']['posterior_samples'][:]
-        print(len(posterior_samples))
 
     fig = plt.figure(1)
     ax  = fig.add_subplot(111)
@@ -323,14 +331,30 @@ if __name__ == "__main__":
                   show_titles=True, title_kwargs={"fontsize": 12}, smooth2d=1.0)
     plt.savefig('test/hyper_injection.pdf', bbox_inches='tight')
     plt.close(fig)
-#
-#    for n in M.names:
-#        fig = plt.figure()
-#        ax  = fig.add_subplot(111)
-#        ax.hist(M.t[n], bins=100, density=True)
-#        if n == 'mu':
-#            for m in events:
-#                ax.axvlines(m)
-#        plt.savefig('test/{0}.pdf'.format(n), bbox_inches='tight')
-#        plt.close(fig)
+
+    fig = plt.figure(1)
+    ax  = fig.add_subplot(111)
+    ax.plot(t, data, 'k', lw=0.7, label='data')
+    
+    strain = np.zeros((posterior_samples.shape[0],t.shape[0]),dtype=np.float64)
+    for s in tqdm(range(posterior_samples.shape[0])):
+        
+        
+        G0 = (norm(posterior_samples[s]['mu_m'], posterior_samples[s]['sigma_m']),
+              expon(scale=posterior_samples[s]['r0']), expon(scale=posterior_samples[s]['z0']), uniform(0.0,2*np.pi))
+              
+        w, events  = dirichlet_sample_approximation(G0,
+                                                    int(posterior_samples[s]['N']),
+                                                    alpha = posterior_samples[s]['concentration_parameter'])
+        
+        for j,e in enumerate(events):
+            strain[s,:] += chirp(LivePoint(['M','r','z','phi'], d=e), t, t0 = 30000)
+    
+    l,m,h = np.percentile(strain,[5,50,95],axis=0)
+    ax.fill_between(t,l,h,facecolor='turquoise',alpha=0.5)
+    ax.plot(t, m, 'black', lw=0.7, alpha=0.5, linestyle='dashed')
+    
+    plt.legend()
+    plt.savefig('test/signals_reconstruction.pdf', bbox_inches='tight')
+    plt.close(fig)
         
